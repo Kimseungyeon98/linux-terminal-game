@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Linux Quest — 리눅스 명령어 서바이벌</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+  <header id="topbar">
+    <div class="topbar-left">
+      <span class="logo">🐧 Linux Quest</span>
+      <span class="subtitle">신입 서버 운영 담당자 생존기</span>
+    </div>
+    <div class="topbar-right">
+      <div class="level-badge">Lv.<span id="levelNum">1</span></div>
+      <div class="xp-bar-wrap">
+        <div class="xp-bar-fill" id="xpFill"></div>
+      </div>
+      <span id="xpText">0 / 300 XP</span>
+    </div>
+  </header>
+
+  <div id="main">
+    <aside id="sidebar">
+      <div class="sidebar-section">
+        <h2>미션 목록</h2>
+        <ul id="missionList"></ul>
+      </div>
+      <div class="sidebar-section">
+        <button id="cheatSheetBtn">📖 지금까지 배운 명령어</button>
+      </div>
+    </aside>
+
+    <section id="terminalPane">
+      <div id="missionBrief">
+        <h3 id="missionTitle">-</h3>
+        <p id="missionDesc">-</p>
+        <div id="hintArea">
+          <button id="hintBtn">💡 힌트 보기</button>
+          <div id="hintText" class="hidden"></div>
+        </div>
+      </div>
+
+      <div id="terminalWindow">
+        <div class="terminal-titlebar">
+          <span class="dot red"></span><span class="dot yellow"></span><span class="dot green"></span>
+          <span class="terminal-title">user@linux-game: ~</span>
+          <button id="resetMissionBtn" title="이 미션 다시 시작">↺ 초기화</button>
+        </div>
+        <div id="terminalOutput"></div>
+        <div class="terminal-input-line">
+          <span id="promptLabel" class="prompt">user@linux-game:~$</span>
+          <input id="terminalInput" autocomplete="off" spellcheck="false" autofocus />
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+
+<div id="cheatSheetModal" class="modal hidden">
+  <div class="modal-content">
+    <button id="closeCheatSheet" class="modal-close">✕</button>
+    <h2>📖 지금까지 배운 명령어</h2>
+    <div id="cheatSheetList"></div>
+  </div>
+</div>
+
+<script src="script.js" defer></script>
+</body>
+</html>
