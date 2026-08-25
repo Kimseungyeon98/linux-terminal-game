@@ -267,6 +267,29 @@ html, body {
   border-radius: 4px;
 }
 
+#conceptBtn {
+  background: none;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 5px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  margin-left: 8px;
+}
+#conceptBtn:hover { background: rgba(88, 166, 255, 0.12); }
+
+#conceptText {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--accent);
+  background: rgba(88, 166, 255, 0.08);
+  border-left: 3px solid var(--accent);
+  padding: 8px 12px;
+  border-radius: 4px;
+}
+
 #terminalWindow {
   flex: 1;
   display: flex;

@@ -504,6 +504,193 @@
     return { output };
   }
 
+  /* ---------- 프로세스 / 네트워크 (가상 프로세스 목록 기반) ---------- */
+  function psCmd(args, ctx) {
+    const procs = ctx.processes || [];
+    if (args.includes('aux')) {
+      const header = 'USER       PID  %CPU %MEM COMMAND';
+      const lines = procs.map((p) => `user    ${String(p.pid).padEnd(7)}${p.cpu.toFixed(1).padStart(4)} ${p.mem.toFixed(1).padStart(4)} ${p.name}`);
+      return { output: [header, ...lines] };
+    }
+    const header = '  PID CMD';
+    const lines = procs.map((p) => `${String(p.pid).padStart(5)} ${p.name}`);
+    return { output: [header, ...lines] };
+  }
+
+  function killCmd(args, ctx) {
+    const force = args.includes('-9') || args.includes('-KILL') || args.includes('-SIGKILL');
+    const pidArgs = args.filter((a) => !a.startsWith('-'));
+    if (pidArgs.length === 0) return { error: 'kill: usage: kill [-9] pid' };
+    const procs = ctx.processes || [];
+    for (const pidStr of pidArgs) {
+      const pid = parseInt(pidStr, 10);
+      const idx = procs.findIndex((p) => p.pid === pid);
+      if (idx === -1) return { error: `kill: (${pid}): No such process` };
+      const proc = procs[idx];
+      if (proc.stubborn && !force) continue;
+      procs.splice(idx, 1);
+    }
+    return { output: [] };
+  }
+
+  function netstatCmd(args, ctx) {
+    const procs = (ctx.processes || []).filter((p) => p.port);
+    if (procs.length === 0) return { output: ['(열려있는 포트가 없습니다)'] };
+    const header = 'Proto  Local Address        PID/Program name';
+    const lines = procs.map((p) => `tcp    0.0.0.0:${p.port}         ${p.pid}/${p.name}`);
+    return { output: [header, ...lines] };
+  }
+
+  function lsofCmd(args, ctx) {
+    const joined = args.join(' ');
+    const m = joined.match(/:(\d+)/);
+    if (!m) return { error: 'lsof: usage: lsof -i :PORT' };
+    const port = parseInt(m[1], 10);
+    const proc = (ctx.processes || []).find((p) => p.port === port);
+    if (!proc) return { output: [] };
+    const header = 'COMMAND     PID USER   TYPE   NAME';
+    const line = `${proc.name.padEnd(10)} ${String(proc.pid).padEnd(6)} user  IPv4   *:${proc.port} (LISTEN)`;
+    return { output: [header, line] };
+  }
+
+  function curlCmd(args, ctx) {
+    const flags = args.filter((a) => a.startsWith('-'));
+    const headOnly = flags.includes('-I') || flags.includes('-i');
+    const urlArg = args.find((a) => !a.startsWith('-'));
+    if (!urlArg) return { error: "curl: try 'curl --help' for more information" };
+    const m = urlArg.match(/^https?:\/\/[^:/]+(?::(\d+))?/);
+    const port = m && m[1] ? parseInt(m[1], 10) : 80;
+    const proc = (ctx.processes || []).find((p) => p.port === port);
+    if (!proc) return { error: `curl: (7) Failed to connect to port ${port}: Connection refused` };
+    const status = proc.httpStatus || 200;
+    if (headOnly) return { output: [`HTTP/1.1 ${status} ${status === 200 ? 'OK' : 'Error'}`, 'Content-Type: application/json'] };
+    return { output: [proc.response || '{"status":"ok"}'] };
+  }
+
+  function sleepCmd() { return { output: [] }; }
+
+  function nohupCmd(args, ctx, stdin) {
+    const inner = args[0];
+    if (!inner) return { error: 'nohup: missing operand' };
+    const fn = COMMANDS[inner];
+    if (!fn) return { error: `nohup: failed to run command '${inner}': No such file or directory` };
+    return fn(args.slice(1), ctx, stdin) || {};
+  }
+
+  function jobsCmd(args, ctx) {
+    const jobs = ctx.jobs || [];
+    if (jobs.length === 0) return { output: ['표시할 백그라운드 작업이 없습니다.'] };
+    return { output: jobs.map((j) => `[${j.id}]+  Running                 ${j.cmd} &`) };
+  }
+
+  /* ---------- 텍스트 처리 심화 ---------- */
+  function sedCmd(args, ctx, stdin) {
+    const script = args.find((a) => a.startsWith('s/'));
+    if (!script) return { error: "sed: -e expression #1, char 0: no previous regular expression" };
+    const m = script.match(/^s\/(.*)\/(.*)\/(g)?$/);
+    if (!m) return { error: `sed: invalid script: ${script}` };
+    const pattern = m[1];
+    const replacement = m[2];
+    const gflag = m[3];
+    const rest = args.filter((a) => a !== script);
+    let lines;
+    if (rest.length > 0) {
+      const segs = resolvePath(ctx.cwd, rest[0]);
+      const node = getNode(ctx.root, segs);
+      if (!node) return { error: `sed: can't read ${rest[0]}: No such file or directory` };
+      if (node.type === 'dir') return { error: `sed: ${rest[0]}: Is a directory` };
+      lines = node.content.split('\n');
+    } else if (stdin) {
+      lines = stdin;
+    } else {
+      return { error: 'sed: 파일이나 파이프 입력이 필요합니다' };
+    }
+    const output = lines.map((line) => (gflag ? line.split(pattern).join(replacement) : line.replace(pattern, replacement)));
+    return { output };
+  }
+
+  function awkCmd(args, ctx, stdin) {
+    let delim = null;
+    const rest = [];
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '-F') { delim = args[i + 1]; i++; }
+      else if (args[i].startsWith('-F') && args[i].length > 2) { delim = args[i].slice(2); }
+      else rest.push(args[i]);
+    }
+    const script = rest.find((a) => a.includes('print'));
+    if (!script) return { error: 'awk: syntax error' };
+    const fm = script.match(/\$(\d+)/);
+    const fieldNum = fm ? parseInt(fm[1], 10) : 0;
+    const fileArgs = rest.filter((a) => a !== script);
+    let lines;
+    if (fileArgs.length > 0) {
+      const segs = resolvePath(ctx.cwd, fileArgs[0]);
+      const node = getNode(ctx.root, segs);
+      if (!node) return { error: `awk: can't open file ${fileArgs[0]}` };
+      if (node.type === 'dir') return { error: `awk: ${fileArgs[0]}: Is a directory` };
+      lines = node.content.split('\n');
+    } else if (stdin) {
+      lines = stdin;
+    } else {
+      return { error: 'awk: 파일이나 파이프 입력이 필요합니다' };
+    }
+    const output = lines.map((line) => {
+      if (fieldNum === 0) return line;
+      const fields = delim ? line.split(delim) : line.trim().split(/\s+/);
+      return fields[fieldNum - 1] !== undefined ? fields[fieldNum - 1] : '';
+    });
+    return { output };
+  }
+
+  function xargsCmd(args, ctx, stdin) {
+    if (!stdin) return { error: 'xargs: 파이프 입력이 필요합니다' };
+    const cmdName = args[0];
+    if (!cmdName) return { error: 'xargs: 실행할 명령어가 필요합니다' };
+    const fixedArgs = args.slice(1);
+    const fn = COMMANDS[cmdName];
+    if (!fn) return { error: `xargs: ${cmdName}: command not found` };
+    let combined = [];
+    for (const line of stdin) {
+      if (!line) continue;
+      const result = fn(fixedArgs.concat([line]), ctx, null) || {};
+      if (result.error) return { error: result.error };
+      combined = combined.concat(result.output || []);
+    }
+    return { output: combined };
+  }
+
+  /* ---------- 서비스 / 시스템 상태 (가상 서비스 목록·고정 테이블 기반) ---------- */
+  function systemctlCmd(args, ctx) {
+    const action = args[0];
+    const svcName = args[1];
+    const services = ctx.services || [];
+    if (!action) return { error: 'systemctl: usage: systemctl [status|start|stop|restart] <service>' };
+    if (!svcName) return { error: 'systemctl: 서비스 이름이 필요합니다' };
+    const svc = services.find((s) => s.name === svcName);
+    if (!svc) return { error: `Unit ${svcName}.service could not be found.` };
+    if (action === 'status') {
+      const statusLine = svc.status === 'active' ? 'active (running)' : svc.status === 'failed' ? 'failed (Result: exit-code)' : 'inactive (dead)';
+      return { output: [`● ${svc.name}.service`, `   Active: ${statusLine}`] };
+    }
+    if (action === 'start' || action === 'restart') { svc.status = 'active'; return { output: [] }; }
+    if (action === 'stop') { svc.status = 'inactive'; return { output: [] }; }
+    if (action === 'enable') { return { output: [`Created symlink /etc/systemd/system/multi-user.target.wants/${svc.name}.service`] }; }
+    return { error: `systemctl: unknown action '${action}'` };
+  }
+
+  function journalctlCmd(args, ctx) {
+    const idx = args.indexOf('-u');
+    const svcName = idx !== -1 ? args[idx + 1] : null;
+    if (!svcName) return { error: 'journalctl: -u 옵션으로 서비스 이름을 지정해주세요 (예: journalctl -u nginx)' };
+    const svc = (ctx.services || []).find((s) => s.name === svcName);
+    if (!svc) return { output: ['-- No entries --'] };
+    return { output: svc.logs && svc.logs.length ? svc.logs : ['-- No entries --'] };
+  }
+
+  function dfCmd(args, ctx) { return { output: ctx.diskOutput || [] }; }
+  function duCmd(args, ctx) { return { output: ctx.duOutput || [] }; }
+  function freeCmd(args, ctx) { return { output: ctx.memOutput || [] }; }
+
   function whoamiCmd() { return { output: ['user'] }; }
   function clearCmd() { return { output: [], clear: true }; }
 
@@ -526,6 +713,22 @@
     tail: 'tail [-n N] 파일 - 파일의 마지막 N줄(기본 10줄)을 출력합니다.',
     sort: 'sort [-r] [-n] 파일 - 줄을 정렬합니다. -r: 역순, -n: 숫자로 정렬',
     uniq: 'uniq [-c] 파일 - 바로 위 줄과 같은 중복 줄을 제거합니다. (보통 sort와 함께 사용) -c: 중복 횟수 표시',
+    ps: 'ps aux - 실행 중인 프로세스를 CPU/메모리 사용률과 함께 표시합니다.',
+    kill: 'kill [-9] PID - 프로세스를 종료합니다. -9(SIGKILL): 강제 종료',
+    netstat: 'netstat -tlnp / ss -tlnp - 현재 열려있는(listen) 포트와 프로세스를 표시합니다.',
+    lsof: 'lsof -i :포트 - 특정 포트를 점유 중인 프로세스를 찾습니다.',
+    curl: 'curl [-I] URL - HTTP 요청을 보내 응답을 확인합니다. -I: 헤더(상태 코드)만 확인',
+    sleep: 'sleep N - N초간 대기합니다. (백그라운드 실행 연습용 예제 명령어)',
+    nohup: 'nohup 명령어 & - 세션이 끊겨도(SIGHUP) 죽지 않도록 명령을 실행합니다. 보통 &와 함께 씁니다.',
+    jobs: 'jobs - &로 실행한 백그라운드 작업 목록을 표시합니다.',
+    sed: "sed 's/찾을값/바꿀값/[g]' 파일 - 문자열을 치환해서 출력합니다.",
+    awk: "awk [-F구분자] '{print $N}' 파일 - 구분자로 나눈 N번째 값만 추출합니다.",
+    xargs: '명령1 | xargs 명령2 - 앞 명령의 출력 각각에 대해 명령2를 반복 실행합니다.',
+    systemctl: 'systemctl [status|start|stop|restart] 서비스명 - systemd 서비스를 관리합니다.',
+    journalctl: 'journalctl -u 서비스명 - 특정 서비스의 상세 로그를 확인합니다.',
+    df: 'df -h - 디스크 파티션별 사용 용량을 확인합니다.',
+    du: 'du -sh 경로 - 폴더별 사용 용량을 확인합니다.',
+    free: 'free -m - 메모리 사용량을 확인합니다.',
     whoami: 'whoami - 현재 로그인한 사용자 이름을 출력합니다.',
     clear: 'clear - 터미널 화면을 지웁니다.',
     help: 'help - 사용 가능한 명령어 목록을 보여줍니다.',
@@ -550,6 +753,10 @@
     mkdir: mkdirCmd, touch: touchCmd, rm: rmCmd, cp: cpCmd, mv: mvCmd,
     grep: grepCmd, find: findCmd, chmod: chmodCmd, wc: wcCmd,
     head: headCmd, tail: tailCmd, sort: sortCmd, uniq: uniqCmd,
+    ps: psCmd, kill: killCmd, netstat: netstatCmd, ss: netstatCmd, lsof: lsofCmd,
+    curl: curlCmd, sleep: sleepCmd, nohup: nohupCmd, jobs: jobsCmd,
+    sed: sedCmd, awk: awkCmd, xargs: xargsCmd,
+    systemctl: systemctlCmd, journalctl: journalctlCmd, df: dfCmd, du: duCmd, free: freeCmd,
     whoami: whoamiCmd, clear: clearCmd, help: helpCmd, man: manCmd, history: historyCmd,
   };
 
@@ -610,12 +817,21 @@
     return { output: finalOutput, error, clear, cmdName: lastCmdName, args: lastArgs, raw };
   }
 
-  /* & &, ; 로 여러 명령을 한 줄에 이어붙이는 체이닝. &&는 앞 명령이 성공해야 다음을 실행, ;는 항상 다음을 실행 */
+  /* &&, ; 로 여러 명령을 한 줄에 이어붙이는 체이닝. &&는 앞 명령이 성공해야 다음을 실행, ;는 항상 다음을 실행.
+     맨 끝에 단독 & 가 붙으면 백그라운드 작업(jobs)으로 등록한다. */
   function executeChain(raw, ctx) {
     const trimmed = raw.trim();
     if (trimmed === '') return null;
     ctx.history.push(trimmed);
-    const parts = trimmed.split(/(&&|;)/).map((s) => s.trim()).filter((s) => s.length > 0);
+
+    let execLine = trimmed;
+    let background = false;
+    if (execLine.endsWith('&') && !execLine.endsWith('&&')) {
+      background = true;
+      execLine = execLine.slice(0, -1).trim();
+    }
+
+    const parts = execLine.split(/(&&|;)/).map((s) => s.trim()).filter((s) => s.length > 0);
     const segments = [];
     let skipDueToError = false;
     let pendingSep = null;
@@ -627,7 +843,15 @@
       skipDueToError = !!segResult.error;
       pendingSep = null;
     }
-    return { segments, raw: trimmed };
+
+    let backgroundJob = null;
+    if (background && segments.length > 0 && !skipDueToError) {
+      ctx.jobs = ctx.jobs || [];
+      backgroundJob = { id: ctx.jobs.length + 1, pid: 10000 + ctx.jobs.length, cmd: execLine };
+      ctx.jobs.push(backgroundJob);
+    }
+
+    return { segments, raw: trimmed, backgroundJob };
   }
 
   /* ============================================================
@@ -992,6 +1216,254 @@
         return n.content.trim() === String(expected);
       },
     },
+    {
+      id: 'curl-basic', title: '36화. API 서버 살아있는지 확인', difficulty: 'medium',
+      desc: '팀장: "방금 배포한 주문 API 서버(포트 8080)가 잘 떠 있는지 curl로 호출해서 확인해봐."',
+      fs: {},
+      processes: [{ pid: 2001, name: 'node server.js', port: 8080, cpu: 2.1, mem: 3.4, httpStatus: 200, response: '{"status":"healthy","service":"order-api"}' }],
+      hints: ['curl http://localhost:8080', 'curl은 서버에 HTTP 요청을 보내고 응답을 그대로 보여줍니다. 백엔드 개발자가 가장 많이 쓰는 헬스체크 방법이에요.'],
+      commandsTaught: [{ cmd: 'curl URL', desc: 'HTTP 요청을 보내고 응답 본문을 확인' }],
+      concept: 'API 서버를 배포한 뒤 브라우저 없이도 서버가 살아있는지, 응답이 정상인지 터미널에서 바로 확인하는 게 curl입니다. 실무에서는 배포 스크립트 마지막 단계에 헬스체크 curl을 넣어서 자동으로 성공 여부를 판단하기도 해요.',
+      check: (s) => s.cmdName === 'curl' && !s.error && s.output.some((l) => l.includes('healthy')),
+    },
+    {
+      id: 'curl-head', title: '37화. 상태 코드만 빠르게 확인', difficulty: 'medium',
+      desc: '팀장: "이번엔 응답 본문 말고, HTTP 상태 코드만 빠르게 확인하고 싶어. -I 옵션 써봐."',
+      fs: {},
+      processes: [{ pid: 2001, name: 'node server.js', port: 8080, cpu: 2.1, mem: 3.4, httpStatus: 200, response: '{"status":"healthy"}' }],
+      hints: ['curl -I http://localhost:8080', '-I 옵션은 응답 본문 없이 헤더(상태 코드 포함)만 보여줍니다. 대량으로 헬스체크할 때 유용해요.'],
+      commandsTaught: [{ cmd: 'curl -I URL', desc: '응답 본문 없이 HTTP 헤더(상태 코드)만 확인' }],
+      concept: 'HTTP 상태 코드(200=성공, 404=없음, 500=서버 에러)는 API가 정상인지 판단하는 가장 빠른 신호입니다. 응답 본문이 크면 굳이 다 안 받아도 -I로 상태만 빠르게 볼 수 있어요.',
+      check: (s) => s.cmdName === 'curl' && s.args.includes('-I') && s.output.some((l) => l.includes('HTTP/1.1')),
+    },
+    {
+      id: 'curl-refused', title: '38화. 연결이 안 될 때', difficulty: 'medium',
+      desc: '팀장: "결제 서버가 8081 포트에서 떠 있어야 하는데, curl 날려보니까 뭐라고 나오는지 확인해봐. (이 서버는 지금 안 떠 있어)"',
+      fs: {},
+      processes: [],
+      hints: ['curl http://localhost:8081', 'Connection refused 에러가 뜨면 그 포트에 아무 프로세스도 떠 있지 않다는 뜻이에요. "서버가 안 켜졌다"는 걸 의미하는 아주 흔한 에러입니다.'],
+      commandsTaught: [{ cmd: 'curl URL (실패 시)', desc: 'Connection refused = 해당 포트에 아무 서버도 떠 있지 않음' }],
+      concept: '"Connection refused"는 배포 후 가장 자주 마주치는 에러 중 하나입니다. 이 메시지가 뜨면 코드 문제가 아니라 애초에 프로세스가 그 포트에서 실행되지 않고 있다는 뜻이니, 로그부터 볼 게 아니라 프로세스가 떠 있는지부터 확인해야 해요.',
+      check: (s) => s.cmdName === 'curl' && !!s.error && s.error.includes('Connection refused'),
+    },
+    {
+      id: 'netstat-ports', title: '39화. 지금 열려있는 포트 목록', difficulty: 'medium',
+      desc: '팀장: "이 서버에 지금 어떤 서비스들이 떠서 포트를 쓰고 있는지 목록으로 보여줘."',
+      fs: {},
+      processes: [{ pid: 1001, name: 'nginx', port: 80, cpu: 0.5, mem: 1.2 }, { pid: 2001, name: 'node app.js', port: 3000, cpu: 3.1, mem: 5.0 }, { pid: 3001, name: 'mysqld', port: 3306, cpu: 1.8, mem: 12.4 }],
+      hints: ['netstat -tlnp 또는 ss -tlnp', '-t(tcp) -l(listen 중인 것만) -n(숫자로) -p(프로세스 정보) 조합을 자주 씁니다.'],
+      commandsTaught: [{ cmd: 'netstat -tlnp / ss -tlnp', desc: '현재 열려있는(listen 중인) 포트와 프로세스 목록 확인' }],
+      concept: '서버에 여러 프로세스가 떠 있을 때 "이 포트 누가 쓰고 있지?"를 확인하는 게 시스템 운영의 기본기입니다. netstat은 오래된 도구, ss는 더 빠른 최신 대체 도구인데 둘 다 실무에서 섞어 씁니다.',
+      check: (s) => (s.cmdName === 'netstat' || s.cmdName === 'ss') && s.output.some((l) => l.includes('3306')),
+    },
+    {
+      id: 'lsof-port', title: '40화. 이 포트 누가 쓰는거야', difficulty: 'hard',
+      desc: '팀장: "3000번 포트를 어떤 프로세스가 물고 있는지 정확히 찾아줘. netstat 말고 lsof로 해봐."',
+      fs: {},
+      processes: [{ pid: 2001, name: 'node app.js', port: 3000, cpu: 2.0, mem: 4.0 }],
+      hints: ['lsof -i :3000', 'lsof는 "List Open Files"의 약자인데, 특정 포트를 누가 점유하고 있는지 찾을 때 자주 씁니다.'],
+      commandsTaught: [{ cmd: 'lsof -i :포트', desc: '특정 포트를 점유 중인 프로세스를 정확히 찾기' }],
+      concept: 'lsof -i :PORT는 "이 포트 이미 쓰는 중이라 서버가 안 켜져요(Address already in use)" 에러가 났을 때 범인을 찾는 가장 확실한 방법입니다. netstat/ss로 전체 목록을 보는 것보다 특정 포트 하나를 콕 집어 확인할 때 더 편해요.',
+      check: (s) => s.cmdName === 'lsof' && !s.error && s.output.some((l) => l.includes('3000')),
+    },
+    {
+      id: 'kill-port-combo', title: '41화. 최종 미션: 좀비 프로세스 처치', difficulty: 'hard',
+      desc: '팀장: "재배포하려는데 8080 포트가 이미 사용 중이라고 뜨네. 옛날 프로세스가 안 죽고 남아있는 것 같아. 누가 점유하고 있는지 찾아서 죽여버려."',
+      fs: {},
+      processes: [{ pid: 5555, name: 'old-server.js', port: 8080, cpu: 0.1, mem: 2.0 }],
+      hints: ['lsof -i :8080 (또는 netstat -tlnp) 으로 PID를 먼저 확인하고, kill 5555 로 종료하세요.', 'PID(Process ID)를 알아야 kill로 정확히 그 프로세스만 종료할 수 있어요.'],
+      commandsTaught: [{ cmd: 'lsof -i :포트 → kill PID', desc: '포트 점유 프로세스를 찾아서 종료하는 실전 조합' }],
+      concept: '"포트가 이미 사용 중입니다(Address already in use)"는 배포 자동화에서 정말 자주 만나는 에러입니다. 실무 대응 순서는 항상 "누가 쓰고 있는지 찾기 → 그 프로세스 종료하기 → 재배포" 순서예요.',
+      check: (s) => !(s.ctx.processes || []).some((p) => p.port === 8080),
+    },
+    {
+      id: 'ps-aux', title: '42화. 지금 뭐가 돌고 있는지 확인', difficulty: 'easy',
+      desc: '팀장: "서버가 좀 느린 것 같은데, 지금 어떤 프로세스들이 떠서 자원을 쓰고 있는지 확인해봐."',
+      fs: {},
+      processes: [{ pid: 1001, name: 'nginx', port: 80, cpu: 0.5, mem: 1.2 }, { pid: 2001, name: 'node app.js', port: 3000, cpu: 45.2, mem: 30.1 }, { pid: 3001, name: 'batch-export.sh', cpu: 88.9, mem: 12.0 }],
+      hints: ['ps aux', 'ps aux는 지금 실행 중인 모든 프로세스를 CPU/메모리 사용률과 함께 보여줍니다.'],
+      commandsTaught: [{ cmd: 'ps aux', desc: '실행 중인 전체 프로세스를 CPU/메모리 사용률과 함께 확인' }],
+      concept: 'ps aux는 "서버가 왜 느리지?"라는 질문에 가장 먼저 확인하는 명령어입니다. %CPU, %MEM이 비정상적으로 높은 프로세스를 찾아서 원인을 좁혀나가는 게 장애 대응의 첫 단계예요.',
+      check: (s) => s.cmdName === 'ps' && s.args.includes('aux') && !s.error,
+    },
+    {
+      id: 'kill-normal', title: '43화. 프로세스 정상 종료', difficulty: 'medium',
+      desc: '팀장: "batch-export.sh(pid 3001)가 CPU를 너무 많이 먹고 있어. 종료해줘."',
+      fs: {},
+      processes: [{ pid: 3001, name: 'batch-export.sh', cpu: 88.9, mem: 12.0 }],
+      hints: ['kill 3001', 'kill은 기본적으로 프로세스에게 "정상적으로 종료해줘"라는 신호(SIGTERM)를 보냅니다.'],
+      commandsTaught: [{ cmd: 'kill PID', desc: '프로세스에 정상 종료 신호(SIGTERM) 전송' }],
+      concept: '기본 kill은 프로세스에게 "지금까지 하던 작업 정리하고 종료해줘"라고 정중하게 요청하는 것(SIGTERM)입니다. 강제로 끊는 게 아니라서 데이터가 깨질 위험이 적기 때문에, 웬만하면 -9 없이 kill부터 시도하는 게 관례입니다.',
+      check: (s) => !(s.ctx.processes || []).some((p) => p.pid === 3001),
+    },
+    {
+      id: 'kill-9', title: '44화. 안 죽는 프로세스 강제 종료', difficulty: 'hard',
+      desc: '팀장: "hung-worker(pid 4099)는 일반 kill로는 응답이 없어. 강제로 종료시켜야 해."',
+      fs: {},
+      processes: [{ pid: 4099, name: 'hung-worker', cpu: 99.0, mem: 40.0, stubborn: true }],
+      hints: ['먼저 kill 4099 를 시도해보면 아무 반응이 없을 거예요.', 'kill -9 4099 처럼 -9(SIGKILL) 옵션을 쓰면 프로세스를 강제로 즉시 종료시킵니다.'],
+      commandsTaught: [{ cmd: 'kill -9 PID', desc: 'SIGTERM을 무시하는 프로세스를 강제 종료(SIGKILL)' }],
+      concept: 'kill -9(SIGKILL)는 프로세스가 정리할 시간도 안 주고 즉시 죽이는 마지막 수단입니다. 행 걸리거나 응답 없는 프로세스에 쓰지만, 파일 쓰기 중이었다면 데이터가 깨질 수 있어서 정말 안 죽을 때만 최후의 수단으로 써야 해요.',
+      check: (s) => !(s.ctx.processes || []).some((p) => p.pid === 4099),
+    },
+    {
+      id: 'bg-amp', title: '45화. 오래 걸리는 작업 백그라운드로', difficulty: 'medium',
+      desc: '팀장: "이 정리 작업(sleep 100)은 오래 걸려. 터미널이 막히지 않게 백그라운드로 돌려봐."',
+      fs: {},
+      hints: ['sleep 100 &', '명령어 끝에 & 를 붙이면 백그라운드에서 실행되고, 터미널은 바로 다음 명령을 입력받을 수 있어요.'],
+      commandsTaught: [{ cmd: '명령어 &', desc: '명령을 백그라운드로 실행해서 터미널을 막지 않음' }],
+      concept: '오래 걸리는 배치 작업이나 서버 프로세스를 &로 백그라운드 실행하면, 그 작업이 끝날 때까지 기다리지 않고 바로 다음 명령을 이어서 칠 수 있습니다. 실무에서 서버를 직접 실행할 때 자주 쓰는 패턴이에요.',
+      check: (s) => { const t = s.raw.trim(); return t.endsWith('&') && !t.endsWith('&&') && t.includes('sleep'); },
+    },
+    {
+      id: 'nohup-jobs', title: '46화. 로그아웃해도 안 죽게, 확인까지', difficulty: 'hard',
+      desc: '팀장: "SSH 세션이 끊겨도 계속 돌아야 하는 작업이야. nohup까지 같이 써서 백그라운드로 돌리고, jobs로 잘 떴는지 확인해봐."',
+      fs: {},
+      hints: ['nohup sleep 200 &', '그다음 jobs 를 입력해서 백그라운드 작업 목록을 확인해보세요.'],
+      commandsTaught: [{ cmd: 'nohup 명령어 & → jobs', desc: '세션 종료에도 안 죽는 백그라운드 실행 + 작업 목록 확인' }],
+      concept: '기본적으로 SSH 접속이 끊기면 그 세션에서 실행한 프로세스도 같이 죽습니다(SIGHUP 신호). nohup은 "이 신호(HUP)를 무시해라"라는 뜻이라서, 배포 서버에 SSH로 접속해서 뭔가 오래 실행시켜놓고 나올 때 자주 씁니다.',
+      check: (s) => {
+        if (s.cmdName !== 'jobs' || s.output.length === 0 || s.output[0].includes('없습니다')) return false;
+        return s.ctx.history.some((h) => { const t = h.trim(); return h.includes('nohup') && t.endsWith('&') && !t.endsWith('&&'); });
+      },
+    },
+    {
+      id: 'sed-basic', title: '47화. 문자열 치환 미리보기', difficulty: 'medium',
+      desc: '팀장: "nginx.conf에 있는 옛날 도메인을 새 도메인으로 바꾼 결과를 화면에 미리 보여줘 (아직 파일을 진짜로 고치는 건 아니야)."',
+      fs: { 'nginx.conf': F('server_name old-domain.com;\nlisten 80;') },
+      hints: ["sed 's/old-domain.com/new-domain.com/' nginx.conf", 'sed는 s/찾을문자열/바꿀문자열/ 형태로 텍스트를 치환합니다. 화면에 출력만 할 뿐 파일은 그대로예요.'],
+      commandsTaught: [{ cmd: "sed 's/찾을값/바꿀값/' 파일", desc: '파일 내용에서 문자열을 치환해서 출력(파일 자체는 안 바뀜)' }],
+      concept: '설정 파일의 특정 값을 서버마다 다르게 바꿔야 할 때(도메인, 포트, 환경변수 등), sed는 배포 스크립트에서 가장 많이 쓰이는 치환 도구입니다. Nginx 설정, docker-compose.yml 같은 파일을 자동으로 고칠 때 자주 등장해요.',
+      check: (s) => s.cmdName === 'sed' && !s.error && s.output.some((l) => l.includes('new-domain.com')) && !s.output.some((l) => l.includes('old-domain.com')),
+    },
+    {
+      id: 'awk-column', title: '48화. 로그에서 특정 값만 뽑기', difficulty: 'medium',
+      desc: '팀장: "access2.log에서 접속 IP(맨 앞 값)만 쭉 뽑아줘."',
+      fs: { 'access2.log': F(['10.0.0.1 GET /api 200', '10.0.0.2 GET /home 200', '10.0.0.3 GET /login 404'].join('\n')) },
+      hints: ["awk '{print $1}' access2.log", 'awk는 한 줄을 공백 기준으로 나눠서 $1, $2, $3... 번째 값을 뽑을 수 있어요. 로그에서 특정 컬럼만 추출할 때 정말 많이 씁니다.'],
+      commandsTaught: [{ cmd: "awk '{print $N}' 파일", desc: '공백 기준으로 나눈 N번째 값만 추출' }],
+      concept: '로그 한 줄에서 IP, 응답시간, 상태 코드처럼 특정 값만 뽑아 통계를 낼 때 awk가 표준 도구입니다. grep이 "줄을 찾는" 도구라면, awk는 "그 줄에서 원하는 조각만 꺼내는" 도구예요.',
+      check: (s) => {
+        if (s.cmdName !== 'awk') return false;
+        const n = getNodeFromHome(s.ctx, 'access2.log');
+        const expected = n.content.split('\n').map((l) => l.trim().split(/\s+/)[0]);
+        return s.output.length === expected.length && s.output.join('\n') === expected.join('\n');
+      },
+    },
+    {
+      id: 'awk-delim', title: '49화. 구분자가 다른 로그 다루기', difficulty: 'medium',
+      desc: '팀장: "metrics.csv는 콤마(,)로 값이 구분돼 있어. 세 번째 값(응답시간)만 뽑아줘."',
+      fs: { 'metrics.csv': F(['GET,/api,120ms', 'POST,/login,340ms', 'GET,/home,80ms'].join('\n')) },
+      hints: ["awk -F, '{print $3}' metrics.csv", '-F 옵션으로 구분자를 지정할 수 있어요. 기본은 공백이지만 콤마(,)나 콜론(:)으로 구분된 로그도 흔합니다.'],
+      commandsTaught: [{ cmd: "awk -F구분자 '{print $N}' 파일", desc: '공백이 아닌 다른 구분자(콤마 등) 기준으로 값 추출' }],
+      concept: 'CSV 형식 로그나 /etc/passwd 같은 시스템 파일은 공백이 아니라 콤마(,)나 콜론(:)으로 값이 나뉩니다. -F 옵션으로 구분자를 바꿀 수 있다는 걸 알아두면 어떤 형식의 로그를 만나도 당황하지 않아요.',
+      check: (s) => {
+        if (s.cmdName !== 'awk') return false;
+        const n = getNodeFromHome(s.ctx, 'metrics.csv');
+        const expected = n.content.split('\n').map((l) => l.split(',')[2]);
+        return s.output.length === expected.length && s.output.join('\n') === expected.join('\n');
+      },
+    },
+    {
+      id: 'xargs-cleanup', title: '50화. 찾은 파일 한번에 정리', difficulty: 'hard',
+      desc: '팀장: "project3 폴더 밑에 .tmp 파일들이 여기저기 흩어져 있는데, 어디 있는지 다 찾아서 한 번에 삭제까지 해줘."',
+      fs: { project3: D({ a: D({ 'cache1.tmp': F('x') }), b: D({ 'cache2.tmp': F('y'), 'keep.txt': F('z') }) }) },
+      hints: ['find project3 -name "*.tmp" | xargs rm', 'xargs는 앞 명령어의 출력(파일 경로 목록)을 받아서, 그 각각에 대해 rm 같은 명령어를 실행해줍니다.'],
+      commandsTaught: [{ cmd: 'find ... | xargs 명령어', desc: '찾은 결과 각각에 대해 명령어를 일괄 실행' }],
+      concept: 'find로 파일을 100개 찾았다고 해서 rm을 100번 칠 수는 없죠. xargs는 파이프로 받은 목록 하나하나에 대해 명령어를 자동으로 반복 실행해줘서, "찾아서 한 번에 처리"하는 스크립트의 핵심 조합입니다.',
+      check: (s) => {
+        const dir = getNodeFromHome(s.ctx, 'project3');
+        if (!dir) return false;
+        let tmpFound = false;
+        (function walk(n) {
+          if (n.type === 'dir') { Object.keys(n.children).forEach((k) => { if (k.endsWith('.tmp')) tmpFound = true; walk(n.children[k]); }); }
+        })(dir);
+        const keep = getNodeFromHome(s.ctx, 'project3/b/keep.txt');
+        return !tmpFound && !!keep;
+      },
+    },
+    {
+      id: 'grep-awk-combo', title: '51화. 파이프 조합: 필터링 후 값 추출', difficulty: 'hard',
+      desc: '팀장: "access2.log에서 404 에러만 골라서, 그 요청을 보낸 IP만 뽑아줘. grep이랑 awk를 파이프로 이어서 한 번에 처리해봐."',
+      fs: { 'access2.log': F(['10.0.0.1 GET /api 200', '10.0.0.2 GET /home 200', '10.0.0.3 GET /login 404', '10.0.0.4 GET /old 404'].join('\n')) },
+      hints: ["grep 404 access2.log | awk '{print $1}'", '먼저 grep으로 원하는 줄만 걸러내고, 그 결과를 awk에 파이프로 넘겨서 값을 추출하는 조합이에요. 실무 로그 분석에서 정말 자주 쓰는 패턴입니다.'],
+      commandsTaught: [{ cmd: "grep 패턴 파일 | awk '{print $N}'", desc: '조건에 맞는 줄만 걸러낸 뒤 필요한 값만 추출' }],
+      concept: '실무 로그 분석은 대부분 "먼저 조건으로 줄을 거르고(grep) → 그 중에서 필요한 값만 뽑는다(awk)"의 반복입니다. 이 패턴 하나만 익혀도 웬만한 로그 집계는 셸 한 줄로 끝낼 수 있어요.',
+      check: (s) => {
+        if (!s.raw.includes('|')) return false;
+        const n = getNodeFromHome(s.ctx, 'access2.log');
+        const expected = n.content.split('\n').filter((l) => l.includes('404')).map((l) => l.trim().split(/\s+/)[0]);
+        return s.output.length > 0 && s.output.join('\n') === expected.join('\n');
+      },
+    },
+    {
+      id: 'systemctl-status', title: '52화. 서비스 상태 확인', difficulty: 'medium',
+      desc: '팀장: "배포한 API 서버가 systemd 서비스로 잘 등록됐는지, api-server 상태를 확인해봐."',
+      fs: {},
+      services: [{ name: 'api-server', status: 'active' }],
+      hints: ['systemctl status api-server', 'systemctl status는 서비스가 실행 중인지(active), 멈춰있는지(inactive), 죽었는지(failed) 보여줍니다.'],
+      commandsTaught: [{ cmd: 'systemctl status 서비스명', desc: '서비스의 현재 실행 상태 확인' }],
+      concept: '요즘 리눅스 서버 대부분은 systemd로 서비스(nginx, 우리 API 서버 등)를 관리합니다. 배포 후 "서비스가 정상 등록되고 살아있는지"를 확인하는 게 systemctl status의 역할이에요.',
+      check: (s) => s.cmdName === 'systemctl' && s.args.includes('status') && s.args.includes('api-server') && !s.error,
+    },
+    {
+      id: 'systemctl-restart', title: '53화. 죽은 서비스 재기동', difficulty: 'medium',
+      desc: '팀장: "nginx가 설정 오류로 죽어있어(failed). 재시작해서 다시 살려줘."',
+      fs: {},
+      services: [{ name: 'nginx', status: 'failed' }],
+      hints: ['systemctl restart nginx', 'restart는 서비스를 멈췄다가 다시 시작합니다. 설정 변경 후에도 반영을 위해 자주 씁니다.'],
+      commandsTaught: [{ cmd: 'systemctl restart 서비스명', desc: '서비스를 중지 후 다시 시작(설정 반영, 장애 복구)' }],
+      concept: '설정 파일을 고쳤는데 반영이 안 되거나, 서비스가 알 수 없는 이유로 죽어있을 때 가장 먼저 시도하는 게 restart입니다. 물론 왜 죽었는지 로그(journalctl)도 같이 확인하는 습관이 중요해요.',
+      check: (s) => {
+        const svc = (s.ctx.services || []).find((x) => x.name === 'nginx');
+        return !!svc && svc.status === 'active' && s.cmdName === 'systemctl' && s.args.includes('restart');
+      },
+    },
+    {
+      id: 'journalctl', title: '54화. 서비스 로그로 원인 찾기', difficulty: 'hard',
+      desc: '팀장: "payment-worker가 자꾸 죽는대. 최근 로그를 좀 봐줘."',
+      fs: {},
+      services: [{ name: 'payment-worker', status: 'failed', logs: ['Aug 15 10:00:01 payment-worker[1234]: Starting worker', 'Aug 15 10:00:05 payment-worker[1234]: FATAL: DB connection refused', 'Aug 15 10:00:05 payment-worker[1234]: Worker exited with code 1'] }],
+      hints: ['journalctl -u payment-worker', '-u 옵션으로 특정 서비스의 로그만 골라서 볼 수 있어요. systemctl status보다 훨씬 자세한 로그가 나옵니다.'],
+      commandsTaught: [{ cmd: 'journalctl -u 서비스명', desc: '특정 systemd 서비스의 상세 로그 확인' }],
+      concept: 'systemctl status는 "지금 죽어있다"는 요약만 보여주지만, 왜 죽었는지는 journalctl로 로그를 봐야 알 수 있습니다. "FATAL: DB connection refused" 같은 실제 에러 메시지가 여기 있어요 — 장애 원인 분석의 시작점입니다.',
+      check: (s) => s.cmdName === 'journalctl' && s.args.includes('-u') && s.args.includes('payment-worker') && s.output.length > 0 && !s.error,
+    },
+    {
+      id: 'df-h', title: '55화. 디스크 용량 확인', difficulty: 'medium',
+      desc: '팀장: "배포 서버 디스크가 꽉 찼다는 알림이 왔어. 용량 좀 확인해줘."',
+      fs: {},
+      diskOutput: ['Filesystem      Size  Used Avail Use% Mounted on', '/dev/sda1        50G   48G  1.2G  98% /', 'tmpfs           2.0G     0  2.0G   0% /dev/shm', '/dev/sdb1       200G  120G   70G  64% /data'],
+      hints: ['df -h', '-h(human-readable) 옵션을 붙이면 용량을 KB 대신 G/M 단위로 보기 좋게 보여줍니다.'],
+      commandsTaught: [{ cmd: 'df -h', desc: '디스크 파티션별 사용 용량을 보기 좋은 단위로 확인' }],
+      concept: '"디스크가 꽉 찼다"는 배포 실패, 로그 기록 실패 등 온갖 장애의 원인이 됩니다. df -h로 어느 파티션이 꽉 찼는지(Use% 98%처럼) 가장 먼저 확인하는 게 장애 대응의 기본입니다.',
+      check: (s) => s.cmdName === 'df' && s.args.includes('-h') && !s.error,
+    },
+    {
+      id: 'du-sh', title: '56화. 용량 많이 먹는 폴더 찾기', difficulty: 'medium',
+      desc: '팀장: "/var/log 밑에 뭐가 이렇게 용량을 많이 먹는지 폴더별로 확인해봐."',
+      fs: {},
+      duOutput: ['2.1G\t/var/log/app', '8.4G\t/var/log/nginx', '512M\t/var/log/mysql', '11G\ttotal'],
+      hints: ['du -sh /var/log/*', '-s(폴더 전체 합계) -h(보기 좋은 단위) 조합으로, 어느 하위 폴더가 용량을 많이 쓰는지 한눈에 볼 수 있어요.'],
+      commandsTaught: [{ cmd: 'du -sh 경로', desc: '폴더별 총 사용 용량을 보기 좋은 단위로 확인' }],
+      concept: 'df가 "파티션 전체가 얼마나 찼는지"를 보여준다면, du는 "어느 폴더가 범인인지" 찾을 때 씁니다. 로그 파일이 로테이션 안 되고 계속 쌓여서 디스크를 채우는 게 실무에서 정말 흔한 사고 원인이에요.',
+      check: (s) => s.cmdName === 'du' && (s.args.includes('-sh') || s.args.includes('-h')) && !s.error,
+    },
+    {
+      id: 'free-m', title: '57화. 최종 미션: 메모리 부족 진단', difficulty: 'hard',
+      desc: '팀장: "서버가 갑자기 느려졌다는 신고가 들어왔어. 메모리 부족인지 확인하고, 메모리를 많이 먹는 프로세스가 있다면 찾아서 대응까지 해봐."',
+      fs: {},
+      processes: [{ pid: 9001, name: 'nginx', cpu: 0.5, mem: 1.0 }, { pid: 9002, name: 'memory-leak-app', cpu: 12.0, mem: 82.5 }, { pid: 9003, name: 'mysqld', cpu: 2.0, mem: 8.0 }],
+      memOutput: ['              total        used        free      shared  buff/cache   available', 'Mem:           8192        7850         120          40         222         180', 'Swap:          2048        1900         148'],
+      hints: ['free -m 로 먼저 메모리 상태를 확인하세요.', '그다음 ps aux 로 메모리를 많이 쓰는 프로세스를 찾고, kill로 종료해보세요 (예: memory-leak-app, pid 9002).'],
+      commandsTaught: [{ cmd: 'free -m → ps aux → kill', desc: '메모리 부족 진단부터 원인 프로세스 종료까지 실전 대응 흐름' }],
+      concept: '메모리 부족(free의 available이 거의 0)은 서버 전체를 느리게 만드는 대표적인 원인입니다. free로 "메모리가 부족하다"를 확인했다면, 그다음은 ps aux로 "누가 메모리를 많이 먹고 있는지" 찾아서 조치하는 게 실전 순서예요.',
+      check: (s) => {
+        const usedFreeM = s.ctx.history.some((h) => h.trim() === 'free -m' || h.trim().startsWith('free -m '));
+        const killed = !(s.ctx.processes || []).some((p) => p.pid === 9002);
+        return usedFreeM && killed;
+      },
+    },
   ];
 
   /* ============================================================
@@ -1046,6 +1518,8 @@
     missionDesc: document.getElementById('missionDesc'),
     hintBtn: document.getElementById('hintBtn'),
     hintText: document.getElementById('hintText'),
+    conceptBtn: document.getElementById('conceptBtn'),
+    conceptText: document.getElementById('conceptText'),
     resetMissionBtn: document.getElementById('resetMissionBtn'),
     terminalOutput: document.getElementById('terminalOutput'),
     terminalInput: document.getElementById('terminalInput'),
@@ -1190,6 +1664,9 @@
     el.hintText.textContent = '';
     el.hintText.classList.add('hidden');
     game.hintIndex = 0;
+    el.conceptText.textContent = '';
+    el.conceptText.classList.add('hidden');
+    el.conceptBtn.classList.toggle('hidden', !mission.concept);
   }
 
   function clearTerminalDOM() {
@@ -1199,7 +1676,17 @@
   function loadMission(index) {
     const mission = MISSIONS[index];
     game.currentIndex = index;
-    game.ctx = { root: buildRoot(cloneTree(mission.fs)), cwd: HOME_PATH.slice(), history: [] };
+    game.ctx = {
+      root: buildRoot(cloneTree(mission.fs || {})),
+      cwd: HOME_PATH.slice(),
+      history: [],
+      processes: mission.processes ? cloneTree(mission.processes) : [],
+      services: mission.services ? cloneTree(mission.services) : [],
+      jobs: [],
+      diskOutput: mission.diskOutput || null,
+      duOutput: mission.duOutput || null,
+      memOutput: mission.memOutput || null,
+    };
     game.historyPointer = 0;
     clearTerminalDOM();
     appendLine(`=== ${mission.title} ===`, 'system-line');
@@ -1241,6 +1728,9 @@
       allOutput = allOutput.concat(seg.output || []);
       lastSeg = seg;
     });
+    if (chainResult.backgroundJob) {
+      appendLine(`[${chainResult.backgroundJob.id}] ${chainResult.backgroundJob.pid}`, 'system-line');
+    }
     updatePromptLabel();
 
     const mission = MISSIONS[game.currentIndex];
@@ -1318,6 +1808,13 @@
     el.hintText.textContent = '💡 ' + mission.hints[game.hintIndex];
     el.hintText.classList.remove('hidden');
     game.hintIndex = (game.hintIndex + 1) % mission.hints.length;
+  });
+
+  el.conceptBtn.addEventListener('click', () => {
+    const mission = MISSIONS[game.currentIndex];
+    if (!mission.concept) return;
+    el.conceptText.textContent = '📚 ' + mission.concept;
+    el.conceptText.classList.toggle('hidden');
   });
 
   el.resetMissionBtn.addEventListener('click', () => loadMission(game.currentIndex));
