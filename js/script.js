@@ -691,6 +691,58 @@
   function duCmd(args, ctx) { return { output: ctx.duOutput || [] }; }
   function freeCmd(args, ctx) { return { output: ctx.memOutput || [] }; }
 
+  /* ---------- Docker (가상 컨테이너 목록 기반) ---------- */
+  function findContainer(ctx, name) {
+    if (!name) return null;
+    return (ctx.containers || []).find((c) => c.name === name || c.id.startsWith(name));
+  }
+
+  function dockerCmd(args, ctx) {
+    const sub = args[0];
+    const rest = args.slice(1);
+    const containers = ctx.containers || [];
+    if (!sub) return { error: "docker: 'docker --help' for more information" };
+
+    if (sub === 'ps') {
+      const showAll = rest.includes('-a');
+      const list = showAll ? containers : containers.filter((c) => c.status === 'running');
+      const header = 'CONTAINER ID   IMAGE           STATUS          PORTS                    NAMES';
+      const lines = list.map((c) => {
+        const statusText = c.status === 'running' ? 'Up' : 'Exited';
+        return `${c.id.slice(0, 12).padEnd(14)} ${c.image.padEnd(15)} ${statusText.padEnd(15)} ${(c.ports || '').padEnd(24)} ${c.name}`;
+      });
+      return { output: [header, ...lines] };
+    }
+    if (sub === 'logs') {
+      const name = rest.find((a) => !a.startsWith('-'));
+      const c = findContainer(ctx, name);
+      if (!c) return { error: `Error: No such container: ${name}` };
+      return { output: c.logs && c.logs.length ? c.logs : [] };
+    }
+    if (sub === 'images') {
+      const images = ctx.images || [];
+      const header = 'REPOSITORY   TAG      IMAGE ID       SIZE';
+      const lines = images.map((i) => `${i.repo.padEnd(12)} ${i.tag.padEnd(8)} ${i.id.padEnd(14)} ${i.size}`);
+      return { output: [header, ...lines] };
+    }
+    if (sub === 'stop' || sub === 'start' || sub === 'restart') {
+      const name = rest[0];
+      const c = findContainer(ctx, name);
+      if (!c) return { error: `Error response from daemon: No such container: ${name}` };
+      c.status = sub === 'stop' ? 'exited' : 'running';
+      return { output: [c.name] };
+    }
+    if (sub === 'rm') {
+      const name = rest.find((a) => !a.startsWith('-'));
+      const idx = containers.findIndex((c) => c.name === name || c.id.startsWith(name || ''));
+      if (idx === -1) return { error: `Error: No such container: ${name}` };
+      if (containers[idx].status === 'running') return { error: 'Error response from daemon: You cannot remove a running container. Stop the container before attempting removal or force remove' };
+      containers.splice(idx, 1);
+      return { output: [name] };
+    }
+    return { error: `docker: '${sub}' is not a docker command.` };
+  }
+
   function whoamiCmd() { return { output: ['user'] }; }
   function clearCmd() { return { output: [], clear: true }; }
 
@@ -729,6 +781,8 @@
     df: 'df -h - 디스크 파티션별 사용 용량을 확인합니다.',
     du: 'du -sh 경로 - 폴더별 사용 용량을 확인합니다.',
     free: 'free -m - 메모리 사용량을 확인합니다.',
+    docker: 'docker [ps|logs|images|stop|start|restart|rm] ... - 도커 컨테이너를 관리합니다. (예: docker ps -a, docker logs 이름)',
+    vi: 'vi 파일 / vim 파일 - vi 편집기로 파일을 엽니다. i(입력모드), Esc(정상모드), :wq(저장후종료), :q!(강제종료), dd(줄삭제), o(줄추가)',
     whoami: 'whoami - 현재 로그인한 사용자 이름을 출력합니다.',
     clear: 'clear - 터미널 화면을 지웁니다.',
     help: 'help - 사용 가능한 명령어 목록을 보여줍니다.',
@@ -757,6 +811,7 @@
     curl: curlCmd, sleep: sleepCmd, nohup: nohupCmd, jobs: jobsCmd,
     sed: sedCmd, awk: awkCmd, xargs: xargsCmd,
     systemctl: systemctlCmd, journalctl: journalctlCmd, df: dfCmd, du: duCmd, free: freeCmd,
+    docker: dockerCmd,
     whoami: whoamiCmd, clear: clearCmd, help: helpCmd, man: manCmd, history: historyCmd,
   };
 
@@ -1464,6 +1519,110 @@
         return usedFreeM && killed;
       },
     },
+    {
+      id: 'docker-ps', title: '58화. 떠 있는 컨테이너 확인', difficulty: 'medium',
+      desc: '팀장: "이 서버에 도커로 띄운 컨테이너가 뭐가 있는지 확인해봐."',
+      fs: {},
+      containers: [{ id: 'a1b2c3d4e5f6', image: 'myapp:latest', name: 'api-server', status: 'running', ports: '0.0.0.0:8080->8080/tcp' }, { id: 'b2c3d4e5f6a1', image: 'redis:7', name: 'cache', status: 'running', ports: '0.0.0.0:6379->6379/tcp' }],
+      hints: ['docker ps', 'docker ps는 지금 실행 중인 컨테이너 목록을 보여줍니다. 일반 ps가 프로세스를 보여준다면, docker ps는 컨테이너 단위로 보여줘요.'],
+      commandsTaught: [{ cmd: 'docker ps', desc: '실행 중인 컨테이너 목록 확인' }],
+      concept: '요즘 백엔드 서버는 컨테이너(도커)로 띄우는 경우가 많습니다. docker ps는 "지금 뭐가 컨테이너로 돌고 있지?"를 확인하는 가장 기본적인 명령어예요.',
+      check: (s) => s.cmdName === 'docker' && s.args[0] === 'ps' && !s.args.includes('-a') && !s.error,
+    },
+    {
+      id: 'docker-ps-a', title: '59화. 멈춘 컨테이너까지 확인', difficulty: 'medium',
+      desc: '팀장: "방금 뭔가 죽은 컨테이너가 있다는데, 멈춘 것까지 전부 다 보여줘."',
+      fs: {},
+      containers: [{ id: 'a1b2c3d4e5f6', image: 'myapp:latest', name: 'api-server', status: 'running', ports: '0.0.0.0:8080->8080/tcp' }, { id: 'c3d4e5f6a1b2', image: 'myapp:old', name: 'old-worker', status: 'exited', ports: '' }],
+      hints: ['docker ps -a', '-a(all) 옵션을 붙이면 멈춘(Exited) 컨테이너까지 전부 보여줍니다. 기본 docker ps는 실행 중인 것만 보여줘요.'],
+      commandsTaught: [{ cmd: 'docker ps -a', desc: '멈춘 컨테이너까지 포함해서 전체 목록 확인' }],
+      concept: '컨테이너가 죽으면 기본 docker ps 목록에서 사라져서 "어? 분명 만들었는데 없어졌네"라고 착각하기 쉽습니다. -a를 붙여야 멈춘 것까지 다 보여요.',
+      check: (s) => s.cmdName === 'docker' && s.args[0] === 'ps' && s.args.includes('-a') && s.output.some((l) => l.includes('old-worker')),
+    },
+    {
+      id: 'docker-logs', title: '60화. 컨테이너 로그로 원인 찾기', difficulty: 'medium',
+      desc: '팀장: "api-server 컨테이너가 계속 재시작된대. 로그 좀 봐줘."',
+      fs: {},
+      containers: [{ id: 'a1b2c3d4e5f6', image: 'myapp:latest', name: 'api-server', status: 'exited', ports: '', logs: ['Starting application...', 'Connecting to database...', 'FATAL: out of memory', 'Container exited with code 137'] }],
+      hints: ['docker logs api-server', 'docker logs 컨테이너이름 으로 그 컨테이너가 출력한 로그를 그대로 볼 수 있어요.'],
+      commandsTaught: [{ cmd: 'docker logs 컨테이너명', desc: '컨테이너가 출력한 로그 확인' }],
+      concept: '컨테이너 안에서 무슨 일이 있었는지는 docker logs로만 알 수 있습니다(컨테이너는 격리돼 있어서 서버의 /var/log를 봐도 안 나와요). "code 137"은 메모리 부족으로 강제 종료됐다는 신호라서, 실무에서 자주 마주치는 에러입니다.',
+      check: (s) => s.cmdName === 'docker' && s.args[0] === 'logs' && s.args.includes('api-server') && s.output.some((l) => l.includes('FATAL')),
+    },
+    {
+      id: 'docker-restart-combo', title: '61화. 컨테이너 재시작', difficulty: 'medium',
+      desc: '팀장: "환경변수를 바꿨으니까 api-server 컨테이너를 껐다가 다시 켜줘. stop 하고 start, 한 줄로 이어서 해봐."',
+      fs: {},
+      containers: [{ id: 'a1b2c3d4e5f6', image: 'myapp:latest', name: 'api-server', status: 'running', ports: '0.0.0.0:8080->8080/tcp' }],
+      hints: ['docker stop api-server && docker start api-server', '&&로 두 명령을 이어서 한 줄에 처리할 수 있어요.'],
+      commandsTaught: [{ cmd: 'docker stop 이름 && docker start 이름', desc: '컨테이너를 멈췄다가 다시 시작(재시작)' }],
+      concept: '컨테이너는 이미지에서 매번 새로 뜨는 게 아니라, stop/start로 같은 컨테이너를 껐다 켤 수 있습니다(내부 상태 유지). 환경변수나 볼륨 설정을 바꾼 뒤 반영하려면 재시작이 필요해요.',
+      check: (s) => {
+        if (!s.raw.includes('&&')) return false;
+        const c = (s.ctx.containers || []).find((x) => x.name === 'api-server');
+        return !!c && c.status === 'running';
+      },
+    },
+    {
+      id: 'docker-cleanup', title: '62화. 최종 미션: 안 쓰는 컨테이너 정리', difficulty: 'hard',
+      desc: '팀장: "old-worker는 이미 멈춰있고 이제 필요없어. 삭제해줘. (실행 중인 컨테이너는 먼저 멈춰야 지울 수 있어요)"',
+      fs: {},
+      containers: [{ id: 'c3d4e5f6a1b2', image: 'myapp:old', name: 'old-worker', status: 'exited', ports: '' }, { id: 'd4e5f6a1b2c3', image: 'myapp:latest', name: 'api-server', status: 'running', ports: '0.0.0.0:8080->8080/tcp' }],
+      hints: ['docker rm old-worker', '멈춰있는(Exited) 컨테이너만 rm으로 지울 수 있어요. 실행 중인 컨테이너를 지우려고 하면 에러가 납니다.'],
+      commandsTaught: [{ cmd: 'docker rm 컨테이너명', desc: '멈춰있는 컨테이너를 삭제(정리)' }],
+      concept: '안 쓰는 컨테이너를 정리하지 않으면 디스크 공간을 계속 차지합니다. docker rm은 멈춰있는 컨테이너만 지울 수 있고, 실행 중인 걸 지우려면 먼저 stop을 해야 해요 — 이 순서를 실무에서 자연스럽게 지키게 됩니다.',
+      check: (s) => !(s.ctx.containers || []).some((c) => c.name === 'old-worker'),
+    },
+    {
+      id: 'vi-insert-save', title: '63화. vi 첫걸음: 입력하고 저장하기', difficulty: 'medium',
+      desc: '팀장: "긴급하게 서버 설정 파일 하나만 고쳐야 하는데 vi밖에 없어. empty.txt 파일을 vi로 열어서 Hello Vim 이라고 입력하고 저장하고 나와봐."',
+      fs: {},
+      hints: ['vi empty.txt 로 파일을 엽니다.', "i 를 누르면 입력 모드(INSERT)로 들어갑니다. 그 상태에서 'Hello Vim'을 타이핑하세요.", '다 쓰고 나면 Esc로 정상 모드로 나온 뒤, :wq 를 입력하고 Enter를 눌러 저장 후 종료합니다.'],
+      commandsTaught: [{ cmd: 'vi 파일', desc: 'vi 편집기로 파일 열기' }, { cmd: 'i → 입력 → Esc → :wq', desc: '입력 모드 진입 → 타이핑 → 정상모드 복귀 → 저장 후 종료' }],
+      concept: 'vi는 리눅스에 기본으로 깔려있는 거의 유일한 에디터라서, GUI도 nano도 없는 서버에 SSH로 접속했을 때 결국 vi를 써야 하는 순간이 옵니다. 딱 4개(i, Esc, :wq, :q!)만 알아도 응급처치는 가능해요.',
+      check: (s) => { const n = getNodeFromHome(s.ctx, 'empty.txt'); return !!n && n.content.includes('Hello Vim'); },
+    },
+    {
+      id: 'vi-quit-nosave', title: '64화. 실수로 고쳤을 때 되돌리기', difficulty: 'medium',
+      desc: '팀장: "readonly.conf 파일 내용을 실수로라도 절대 건드리면 안 돼. vi로 열어서 아무거나 한번 입력해본 다음, 저장하지 말고 강제 종료해봐 (연습용이니 괜찮아요)."',
+      fs: { 'readonly.conf': F('IMPORTANT=do-not-change') },
+      hints: ['vi readonly.conf', 'i로 입력 모드에 들어가서 아무 글자나 입력해보세요.', "Esc를 누른 뒤 :q! 를 입력하면 저장하지 않고 강제로 나갑니다. :q만 누르면 '변경사항이 있다'는 에러가 나면서 안 나가질 거예요 — 그게 바로 :q!가 필요한 이유입니다."],
+      commandsTaught: [{ cmd: ':q!', desc: '저장하지 않고 강제 종료(변경사항 버림)' }],
+      concept: ':q는 저장 안 된 변경사항이 있으면 안전하게 막아줍니다. 실수로 뭔가 고쳤는데 저장하기 싫을 때, :q!로 강제로 무시하고 나가는 게 정답이에요. 이 안전장치 덕분에 vi에서 실수로 파일을 날리는 일이 잘 없습니다.',
+      check: (s) => { const n = getNodeFromHome(s.ctx, 'readonly.conf'); return !!n && n.content === 'IMPORTANT=do-not-change' && s.viSaved === false; },
+    },
+    {
+      id: 'vi-delete-line', title: '65화. 필요없는 줄 삭제하기 (dd)', difficulty: 'hard',
+      desc: '팀장: "app.env 파일에 옛날 설정 한 줄이 그대로 남아있어. DEBUG=true 줄을 vi로 열어서 지우고 저장해줘."',
+      fs: { 'app.env': F('PORT=8080\nDEBUG=true\nENV=production') },
+      hints: ['vi app.env 로 열고, j 또는 아래 화살표로 DEBUG=true 줄까지 커서를 이동하세요.', '그 줄에서 d를 두 번 연속 누르면(dd) 한 줄이 통째로 삭제됩니다.', '삭제 후 :wq로 저장하고 나오세요.'],
+      commandsTaught: [{ cmd: 'dd', desc: '커서가 있는 줄을 통째로 삭제' }],
+      concept: 'dd는 vi에서 가장 많이 쓰는 명령 중 하나입니다. d를 두 번 눌러야 하는 이유는 원래 d가 "삭제 동작 + 범위"를 조합하는 명령이기 때문인데, dd는 그중 "줄 전체"를 뜻하는 가장 흔한 조합이에요.',
+      check: (s) => { const n = getNodeFromHome(s.ctx, 'app.env'); return !!n && !n.content.includes('DEBUG=true') && n.content.includes('PORT=8080') && n.content.includes('ENV=production'); },
+    },
+    {
+      id: 'vi-append-line', title: '66화. 설정 한 줄 추가하기 (o)', difficulty: 'hard',
+      desc: '팀장: "app.env 마지막에 TIMEOUT=30 한 줄을 추가해줘. o 명령어를 써서 새 줄을 열어봐."',
+      fs: { 'app.env': F('PORT=8080\nENV=production') },
+      hints: ['vi app.env 로 열고 마지막 줄로 이동한 뒤(G 또는 화살표), o 를 누르면 아래에 새 줄이 열리면서 바로 입력 모드가 됩니다.', 'TIMEOUT=30 을 입력하고 Esc, 그다음 :wq로 저장하세요.'],
+      commandsTaught: [{ cmd: 'o', desc: '현재 줄 아래에 새 줄을 열고 바로 입력 모드로 진입' }],
+      concept: 'o(open)는 "새 줄 만들고 바로 타이핑 시작"을 한 번에 해주는 명령입니다. i로 줄바꿈을 여러 번 하는 것보다 훨씬 빠르게 줄을 추가할 수 있어서 실무에서 정말 자주 씁니다.',
+      check: (s) => { const n = getNodeFromHome(s.ctx, 'app.env'); return !!n && n.content.includes('TIMEOUT=30') && n.content.includes('PORT=8080') && n.content.includes('ENV=production'); },
+    },
+    {
+      id: 'vi-final', title: '67화. 최종 미션: 설정 파일 직접 고치기', difficulty: 'hard',
+      desc: '팀장: "server.conf에 오타가 있어. PROT=8080 을 PORT=8080 으로 고치고, 마지막에 MAX_CONN=100 줄도 추가해서 저장해줘. vi로 직접 다 해봐."',
+      fs: { 'server.conf': F('PROT=8080\nHOST=0.0.0.0') },
+      hints: ['vi server.conf 로 열고, 오타가 있는 줄에서 dd로 그 줄을 지운 다음, O(또는 그 자리에서 o)로 새 줄을 열어 PORT=8080 을 다시 입력하는 방법이 있어요.', '마지막 줄에서는 o로 새 줄을 열어 MAX_CONN=100 을 추가하세요.', '다 고쳤으면 Esc, :wq 로 저장하고 나오는 것 잊지 마세요.'],
+      commandsTaught: [{ cmd: 'dd + o/O + i 조합', desc: '실전에서 파일을 고칠 때 자주 쓰는 vi 명령 조합' }],
+      concept: '지금까지 배운 i, Esc, :wq, :q!, dd, o 만 있으면 vi로 웬만한 텍스트 파일 수정은 다 할 수 있습니다. 더 많은 기능은 필요할 때 그때그때 찾아보면 되고, 이 정도가 "리눅스 서버에서 응급으로 파일 고치기" 생존 세트예요.',
+      check: (s) => {
+        const n = getNodeFromHome(s.ctx, 'server.conf');
+        if (!n) return false;
+        const c = n.content;
+        return c.includes('PORT=8080') && !c.includes('PROT=8080') && c.includes('MAX_CONN=100') && c.includes('HOST=0.0.0.0');
+      },
+    },
   ];
 
   /* ============================================================
@@ -1487,6 +1646,8 @@
     hintIndex: 0,
     historyPointer: 0,
   };
+
+  let viState = null;
 
   function loadProgress() {
     try {
@@ -1514,6 +1675,8 @@
     xpFill: document.getElementById('xpFill'),
     xpText: document.getElementById('xpText'),
     missionList: document.getElementById('missionList'),
+    missionListDetails: document.getElementById('missionListDetails'),
+    currentMissionLabel: document.getElementById('currentMissionLabel'),
     missionTitle: document.getElementById('missionTitle'),
     missionDesc: document.getElementById('missionDesc'),
     hintBtn: document.getElementById('hintBtn'),
@@ -1523,8 +1686,11 @@
     resetMissionBtn: document.getElementById('resetMissionBtn'),
     terminalOutput: document.getElementById('terminalOutput'),
     terminalInput: document.getElementById('terminalInput'),
+    terminalInputLine: document.getElementById('terminalInputLine'),
     terminalWindow: document.getElementById('terminalWindow'),
     promptLabel: document.getElementById('promptLabel'),
+    viBuffer: document.getElementById('viBuffer'),
+    viStatusBar: document.getElementById('viStatusBar'),
     cheatSheetBtn: document.getElementById('cheatSheetBtn'),
     cheatSheetModal: document.getElementById('cheatSheetModal'),
     cheatSheetList: document.getElementById('cheatSheetList'),
@@ -1644,10 +1810,17 @@
       li.appendChild(label);
       li.appendChild(diffBadge);
       if (unlocked) {
-        li.addEventListener('click', () => loadMission(i));
+        li.addEventListener('click', () => {
+          loadMission(i);
+          if (window.matchMedia('(max-width: 700px)').matches) {
+            el.missionListDetails.removeAttribute('open');
+          }
+        });
       }
       el.missionList.appendChild(li);
     });
+    const current = MISSIONS[game.currentIndex];
+    if (current) el.currentMissionLabel.textContent = '· ' + current.title;
   }
 
   function renderMissionBrief(mission) {
@@ -1674,6 +1847,7 @@
   }
 
   function loadMission(index) {
+    if (viState) closeViEditor(false, true);
     const mission = MISSIONS[index];
     game.currentIndex = index;
     game.ctx = {
@@ -1682,6 +1856,8 @@
       history: [],
       processes: mission.processes ? cloneTree(mission.processes) : [],
       services: mission.services ? cloneTree(mission.services) : [],
+      containers: mission.containers ? cloneTree(mission.containers) : [],
+      images: mission.images ? cloneTree(mission.images) : [],
       jobs: [],
       diskOutput: mission.diskOutput || null,
       duOutput: mission.duOutput || null,
@@ -1712,6 +1888,14 @@
   function handleSubmit() {
     const raw = el.terminalInput.value;
     if (raw.trim() === '') return;
+    if (/^(vi|vim)\s+\S+/.test(raw.trim())) {
+      appendPromptLine(raw);
+      game.ctx.history.push(raw.trim());
+      el.terminalInput.value = '';
+      updatePromptLabel();
+      openViEditor(raw.trim());
+      return;
+    }
     appendPromptLine(raw);
     const chainResult = executeChain(raw, game.ctx);
     el.terminalInput.value = '';
@@ -1733,24 +1917,280 @@
     }
     updatePromptLabel();
 
-    const mission = MISSIONS[game.currentIndex];
-    if (!game.completed.has(mission.id)) {
-      const state = {
-        ctx: game.ctx,
-        cmdName: lastSeg ? lastSeg.cmdName : null,
-        args: lastSeg ? lastSeg.args : [],
-        raw: chainResult.raw,
-        output: lastSeg ? lastSeg.output : [],
-        error: lastSeg ? lastSeg.error : null,
-        allOutput,
-        hadError,
-        cmdNames: chainResult.segments.map((s) => s.cmdName),
-      };
-      let passed = false;
-      try { passed = mission.check(state); } catch (e) { passed = false; }
-      if (passed) completeMission();
-    }
+    checkMissionProgress({
+      ctx: game.ctx,
+      cmdName: lastSeg ? lastSeg.cmdName : null,
+      args: lastSeg ? lastSeg.args : [],
+      raw: chainResult.raw,
+      output: lastSeg ? lastSeg.output : [],
+      error: lastSeg ? lastSeg.error : null,
+      allOutput,
+      hadError,
+      cmdNames: chainResult.segments.map((s) => s.cmdName),
+    });
     scrollTerminalToBottom();
+  }
+
+  function checkMissionProgress(state) {
+    const mission = MISSIONS[game.currentIndex];
+    if (game.completed.has(mission.id)) return;
+    let passed = false;
+    try { passed = mission.check(state); } catch (e) { passed = false; }
+    if (passed) completeMission();
+  }
+
+  /* ============================================================
+   * vi / vim 미니 에디터 (모드 기반 실제 키 입력 처리)
+   * ========================================================== */
+  function writeFileAtSegs(ctx, segs, content) {
+    const segsCopy = segs.slice();
+    const name = segsCopy.pop();
+    const parent = getNode(ctx.root, segsCopy);
+    if (!parent || parent.type !== 'dir') return;
+    if (!parent.children[name]) parent.children[name] = F('');
+    if (parent.children[name].type === 'file') parent.children[name].content = content;
+  }
+
+  function openViEditor(raw) {
+    const filePath = raw.trim().split(/\s+/)[1];
+    const segs = resolvePath(game.ctx.cwd, filePath);
+    const node = getNode(game.ctx.root, segs);
+    const isNew = !node || node.type !== 'file';
+    const content = node && node.type === 'file' ? node.content : '';
+    viState = {
+      lines: content.split('\n'),
+      cursorRow: 0,
+      cursorCol: 0,
+      mode: 'normal',
+      cmdBuffer: '',
+      pendingKey: null,
+      yank: null,
+      dirty: false,
+      isNew,
+      filePath,
+      segs,
+      rawCmd: raw,
+      lastMsg: null,
+    };
+    el.terminalOutput.classList.add('hidden');
+    el.terminalInputLine.classList.add('hidden');
+    el.viBuffer.classList.remove('hidden');
+    el.viStatusBar.classList.remove('hidden');
+    el.terminalInput.blur();
+    document.addEventListener('keydown', onViKeyDown, true);
+    renderVi();
+  }
+
+  function closeViEditor(saved, silent) {
+    document.removeEventListener('keydown', onViKeyDown, true);
+    const st = viState;
+    if (saved && st) {
+      writeFileAtSegs(game.ctx, st.segs, st.lines.join('\n'));
+    }
+    el.viBuffer.classList.add('hidden');
+    el.viStatusBar.classList.add('hidden');
+    el.terminalOutput.classList.remove('hidden');
+    el.terminalInputLine.classList.remove('hidden');
+    viState = null;
+    if (silent || !st) return;
+    if (saved) {
+      appendLine(`"${st.filePath}" ${st.lines.length}L, ${st.lines.join('\n').length}C written`, 'output-line');
+    }
+    updatePromptLabel();
+    checkMissionProgress({
+      ctx: game.ctx,
+      cmdName: 'vi',
+      args: st.rawCmd.trim().split(/\s+/).slice(1),
+      raw: st.rawCmd,
+      output: [],
+      error: null,
+      allOutput: [],
+      hadError: false,
+      cmdNames: ['vi'],
+      viSaved: saved,
+    });
+    scrollTerminalToBottom();
+    el.terminalInput.focus();
+  }
+
+  function runViCommand(cmd) {
+    const st = viState;
+    const c = cmd.trim();
+    if (c === 'w') {
+      writeFileAtSegs(game.ctx, st.segs, st.lines.join('\n'));
+      st.dirty = false;
+      st.mode = 'normal';
+      st.lastMsg = `"${st.filePath}" written`;
+    } else if (c === 'q') {
+      if (st.dirty) {
+        st.mode = 'normal';
+        st.lastMsg = 'E37: No write since last change (add ! to override)';
+      } else {
+        closeViEditor(false);
+      }
+    } else if (c === 'q!') {
+      closeViEditor(false);
+    } else if (c === 'wq' || c === 'x') {
+      closeViEditor(true);
+    } else {
+      st.mode = 'normal';
+      st.lastMsg = `E492: Not an editor command: ${c}`;
+    }
+  }
+
+  function onViKeyDown(e) {
+    if (!viState) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const allowedSpecial = ['Escape', 'Enter', 'Backspace', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'];
+    if (e.key.length > 1 && !allowedSpecial.includes(e.key)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const st = viState;
+
+    if (st.mode === 'insert') {
+      if (e.key === 'Escape') {
+        st.mode = 'normal';
+        if (st.cursorCol > 0) st.cursorCol--;
+      } else if (e.key === 'Enter') {
+        const line = st.lines[st.cursorRow];
+        const before = line.slice(0, st.cursorCol);
+        const after = line.slice(st.cursorCol);
+        st.lines.splice(st.cursorRow, 1, before, after);
+        st.cursorRow++;
+        st.cursorCol = 0;
+        st.dirty = true;
+      } else if (e.key === 'Backspace') {
+        if (st.cursorCol > 0) {
+          const line = st.lines[st.cursorRow];
+          st.lines[st.cursorRow] = line.slice(0, st.cursorCol - 1) + line.slice(st.cursorCol);
+          st.cursorCol--;
+          st.dirty = true;
+        } else if (st.cursorRow > 0) {
+          const prevLen = st.lines[st.cursorRow - 1].length;
+          st.lines[st.cursorRow - 1] += st.lines[st.cursorRow];
+          st.lines.splice(st.cursorRow, 1);
+          st.cursorRow--;
+          st.cursorCol = prevLen;
+          st.dirty = true;
+        }
+      } else if (e.key.length === 1) {
+        const line = st.lines[st.cursorRow];
+        st.lines[st.cursorRow] = line.slice(0, st.cursorCol) + e.key + line.slice(st.cursorCol);
+        st.cursorCol++;
+        st.dirty = true;
+      }
+      renderVi();
+      return;
+    }
+
+    if (st.mode === 'command') {
+      if (e.key === 'Escape') {
+        st.mode = 'normal';
+        st.cmdBuffer = '';
+        renderVi();
+      } else if (e.key === 'Enter') {
+        const cmdToRun = st.cmdBuffer;
+        st.cmdBuffer = '';
+        runViCommand(cmdToRun);
+        if (viState) renderVi();
+      } else if (e.key === 'Backspace') {
+        st.cmdBuffer = st.cmdBuffer.slice(0, -1);
+        renderVi();
+      } else if (e.key.length === 1) {
+        st.cmdBuffer += e.key;
+        renderVi();
+      }
+      return;
+    }
+
+    // normal mode
+    const key = e.key;
+    if (st.pendingKey) {
+      const combo = st.pendingKey + key;
+      st.pendingKey = null;
+      if (combo === 'dd') {
+        st.yank = st.lines[st.cursorRow];
+        st.lines.splice(st.cursorRow, 1);
+        if (st.lines.length === 0) st.lines = [''];
+        if (st.cursorRow >= st.lines.length) st.cursorRow = st.lines.length - 1;
+        st.cursorCol = 0;
+        st.dirty = true;
+      } else if (combo === 'yy') {
+        st.yank = st.lines[st.cursorRow];
+      } else if (combo === 'gg') {
+        st.cursorRow = 0;
+        st.cursorCol = 0;
+      }
+      renderVi();
+      return;
+    }
+    if (key === 'd' || key === 'y' || key === 'g') { st.pendingKey = key; return; }
+
+    if (key === 'i') { st.mode = 'insert'; }
+    else if (key === 'a') { st.mode = 'insert'; st.cursorCol = Math.min(st.cursorCol + 1, st.lines[st.cursorRow].length); }
+    else if (key === 'o') { st.lines.splice(st.cursorRow + 1, 0, ''); st.cursorRow++; st.cursorCol = 0; st.mode = 'insert'; st.dirty = true; }
+    else if (key === 'O') { st.lines.splice(st.cursorRow, 0, ''); st.cursorCol = 0; st.mode = 'insert'; st.dirty = true; }
+    else if (key === 'x') {
+      const line = st.lines[st.cursorRow];
+      if (st.cursorCol < line.length) {
+        st.lines[st.cursorRow] = line.slice(0, st.cursorCol) + line.slice(st.cursorCol + 1);
+        st.dirty = true;
+      }
+    } else if (key === 'p') {
+      if (st.yank !== null) { st.lines.splice(st.cursorRow + 1, 0, st.yank); st.cursorRow++; st.dirty = true; }
+    } else if (key === 'G') { st.cursorRow = st.lines.length - 1; st.cursorCol = 0; }
+    else if (key === ':') { st.mode = 'command'; st.cmdBuffer = ''; }
+    else if (key === 'h' || key === 'ArrowLeft') { st.cursorCol = Math.max(0, st.cursorCol - 1); }
+    else if (key === 'l' || key === 'ArrowRight') { st.cursorCol = Math.min(st.lines[st.cursorRow].length, st.cursorCol + 1); }
+    else if (key === 'j' || key === 'ArrowDown') { st.cursorRow = Math.min(st.lines.length - 1, st.cursorRow + 1); st.cursorCol = Math.min(st.cursorCol, st.lines[st.cursorRow].length); }
+    else if (key === 'k' || key === 'ArrowUp') { st.cursorRow = Math.max(0, st.cursorRow - 1); st.cursorCol = Math.min(st.cursorCol, st.lines[st.cursorRow].length); }
+
+    renderVi();
+  }
+
+  function renderVi() {
+    if (!viState) return;
+    const st = viState;
+    el.viBuffer.innerHTML = '';
+    st.lines.forEach((line, i) => {
+      const lineDiv = document.createElement('div');
+      lineDiv.className = 'vi-line';
+      const numSpan = document.createElement('span');
+      numSpan.className = 'vi-linenum';
+      numSpan.textContent = String(i + 1).padStart(3, ' ');
+      lineDiv.appendChild(numSpan);
+      const textSpan = document.createElement('span');
+      textSpan.className = 'vi-text';
+      if (i === st.cursorRow) {
+        const before = line.slice(0, st.cursorCol);
+        const atChar = line.slice(st.cursorCol, st.cursorCol + 1) || ' ';
+        const after = line.slice(st.cursorCol + 1);
+        textSpan.appendChild(document.createTextNode(before));
+        const cursorSpan = document.createElement('span');
+        cursorSpan.className = 'vi-cursor';
+        cursorSpan.textContent = atChar;
+        textSpan.appendChild(cursorSpan);
+        textSpan.appendChild(document.createTextNode(after));
+      } else {
+        textSpan.textContent = line;
+      }
+      lineDiv.appendChild(textSpan);
+      el.viBuffer.appendChild(lineDiv);
+    });
+    const fillerCount = Math.max(0, 16 - st.lines.length);
+    for (let i = 0; i < fillerCount; i++) {
+      const d = document.createElement('div');
+      d.className = 'vi-filler';
+      d.textContent = '~';
+      el.viBuffer.appendChild(d);
+    }
+
+    let statusText;
+    if (st.mode === 'insert') statusText = '-- INSERT --';
+    else if (st.mode === 'command') statusText = ':' + st.cmdBuffer;
+    else if (st.lastMsg) { statusText = st.lastMsg; st.lastMsg = null; }
+    else statusText = `"${st.filePath}"${st.isNew ? ' [New File]' : ''} ${st.lines.length}L${st.dirty ? ' [+]' : ''}`;
+    el.viStatusBar.textContent = statusText;
   }
 
   function renderCheatSheet() {
@@ -1840,6 +2280,9 @@
     }
     loadMission(game.currentIndex);
     renderHeader();
+    if (window.matchMedia('(max-width: 700px)').matches) {
+      el.missionListDetails.removeAttribute('open');
+    }
   }
 
   init();

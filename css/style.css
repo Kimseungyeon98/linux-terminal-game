@@ -28,6 +28,7 @@ html, body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  height: 100dvh;
 }
 
 /* ---------- Top bar ---------- */
@@ -118,6 +119,24 @@ html, body {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin: 0 0 10px 0;
+}
+
+#missionListDetails summary {
+  font-size: 13px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0 0 10px 0;
+  cursor: pointer;
+  user-select: none;
+  list-style: revert;
+}
+
+.current-mission-label {
+  text-transform: none;
+  letter-spacing: normal;
+  color: var(--text);
+  font-size: 12px;
 }
 
 #missionList {
@@ -350,6 +369,57 @@ html, body {
   line-height: 1.65;
 }
 
+.vi-buffer {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0;
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.vi-line {
+  display: flex;
+  padding: 0 16px;
+  white-space: pre;
+}
+
+.vi-linenum {
+  color: #4a5568;
+  width: 34px;
+  flex-shrink: 0;
+  text-align: right;
+  margin-right: 12px;
+  user-select: none;
+}
+
+.vi-text {
+  color: var(--text);
+  white-space: pre;
+}
+
+.vi-cursor {
+  background: var(--green);
+  color: #04240c;
+}
+
+.vi-filler {
+  color: #30363d;
+  padding-left: 62px;
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+}
+
+.vi-status-bar {
+  flex-shrink: 0;
+  background: #1a1f27;
+  color: var(--yellow);
+  padding: 7px 16px;
+  font-size: 12.5px;
+  font-family: var(--font-mono);
+  border-top: 1px solid var(--panel-border);
+}
+
 .line { white-space: pre-wrap; word-break: break-all; }
 .line.prompt-line { color: var(--muted); }
 .line.prompt-line .prompt-echo { color: var(--green); }
@@ -524,7 +594,63 @@ html, body {
   border-radius: 4px;
 }
 
-@media (max-width: 800px) {
-  #main { flex-direction: column; }
-  #sidebar { width: 100%; border-right: none; border-bottom: 1px solid var(--panel-border); max-height: 220px; }
+@media (max-width: 700px) {
+  #topbar {
+    padding: 8px 12px;
+    flex-wrap: nowrap;
+  }
+  .topbar-left { gap: 6px; min-width: 0; overflow: hidden; }
+  .logo { font-size: 15px; white-space: nowrap; }
+  .subtitle { display: none; }
+  .topbar-right { gap: 6px; flex-shrink: 0; }
+  .level-badge { font-size: 11px; padding: 3px 7px; }
+  .xp-bar-wrap { width: 54px; }
+  #xpText { font-size: 10px; }
+
+  #main { flex-direction: column; min-height: 0; }
+
+  #sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--panel-border);
+    flex-shrink: 0;
+    padding: 10px 12px;
+    max-height: none;
+    overflow-y: visible;
+  }
+
+  #missionListDetails #missionList {
+    max-height: 48vh;
+    overflow-y: auto;
+    margin-top: 10px;
+  }
+
+  #cheatSheetBtn { margin-top: 10px; padding: 12px; }
+
+  #terminalPane {
+    flex: 1;
+    min-height: 0;
+    padding: 10px 12px;
+    gap: 10px;
+  }
+
+  #missionBrief { padding: 10px 14px; max-height: 32vh; overflow-y: auto; }
+  #missionTitle { font-size: 15px; }
+  #missionDesc { font-size: 13px; }
+
+  #hintArea { display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-start; }
+  #hintBtn, #conceptBtn { margin-left: 0; padding: 7px 12px; font-size: 12.5px; }
+  #hintText, #conceptText { flex-basis: 100%; }
+
+  #terminalWindow { flex: 1; min-height: 0; }
+
+  #terminalInput { font-size: 16px; }
+  .prompt { font-size: 12.5px; }
+
+  .vi-buffer { overflow-x: auto; font-size: 12.5px; }
+  .vi-status-bar { font-size: 11.5px; padding: 8px 12px; }
+
+  .modal-content { width: 92vw; padding: 18px 16px; }
+
+  .success-banner button { padding: 9px 16px; font-size: 13.5px; }
 }

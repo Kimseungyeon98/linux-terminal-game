@@ -24,10 +24,10 @@
 
   <div id="main">
     <aside id="sidebar">
-      <div class="sidebar-section">
-        <h2>미션 목록</h2>
+      <details id="missionListDetails" class="sidebar-section" open>
+        <summary>미션 목록 <span id="currentMissionLabel" class="current-mission-label"></span></summary>
         <ul id="missionList"></ul>
-      </div>
+      </details>
       <div class="sidebar-section">
         <button id="cheatSheetBtn">📖 지금까지 배운 명령어</button>
       </div>
@@ -52,10 +52,12 @@
           <button id="resetMissionBtn" title="이 미션 다시 시작">↺ 초기화</button>
         </div>
         <div id="terminalOutput"></div>
-        <div class="terminal-input-line">
+        <div id="viBuffer" class="vi-buffer hidden"></div>
+        <div id="terminalInputLine" class="terminal-input-line">
           <span id="promptLabel" class="prompt">user@linux-game:~$</span>
           <input id="terminalInput" autocomplete="off" spellcheck="false" autofocus />
         </div>
+        <div id="viStatusBar" class="vi-status-bar hidden"></div>
       </div>
     </section>
   </div>
